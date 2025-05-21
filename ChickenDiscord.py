@@ -9,10 +9,13 @@ import re
 import aiohttp
 import tempfile
 import datetime
+import random
+import spacy
 
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
 GUILD = os.getenv('DISCORD_GUILD')
+GUILD_ID = os.getenv('DISCORD_GUILD_ID')
 CHANNEL = os.getenv('DISCORD_CHANNEL')
 
 async def get_last_announcement_time():
@@ -34,12 +37,50 @@ async def set_last_announcement_time(timestamp):
     conn.commit()
     conn.close()
 
+def yoda_transform(text):
+
+    nlp = spacy.load("en_core_web_sm")
+    suffixes = [
+        "Hmm.", "Yes, hmmm.", "Strong with the Force, this one is.", "Mmm.", "Meditate on this, I will.", "The path to the dark side, that is.", "Powerful you have become.", "Do or do not, there is no try.", "Much to learn, you still have.", "Ready, are you?", "Clouded, this one’s future is.", "Begun, the Clone War has.", "A Jedi craves not these things.", "Always in motion is the future.", "Control, control, you must learn control!", "That is why you fail.", "Hmm. Difficult to see. Always in motion is the future.", "You must unlearn what you have learned.", "Adventure. Excitement. A Jedi craves not these things.", "Wars not make one great.", "Judge me by my size, do you?", "When nine hundred years old you reach, look as good you will not.", "Patience you must have, my young Padawan.", "Truly wonderful, the mind of a child is.", "Mind what you have learned. Save you it can.", "Much fear I sense in you.", "Help you I can, yes.", "Into exile I must go. Failed, I have.", "Hmm. Yes. A flaw more and more common this is.", "Twisted by the dark side, young Skywalker has become.", "The greatest teacher, failure is.", "Fear is the path to the dark side.", "Anger leads to hate, hate leads to suffering.", "Seen it, I have.", "Foreseen this, I have.", "Dark times are ahead.", "If so powerful you are, why leave?", "Long have I watched.", "Yessss.", "Strong am I with the Force.", "In a dark place we find ourselves.", "Hope is not lost.", "To answer power with power, the Jedi way this is not.", "Truly the dark side clouds everything.", "Rest I need, yes.", "Take care of you, I will.", "Trust the Force, you must.", "Listen you must.", "Clear your mind must be, if you are to discover the real villains behind this plot.", "Over many paths the Force flows.", "Your focus determines your reality."
+    ]
+    sentences = re.split(r'([.!?])', text)
+    result = []
+    for i in range(0, len(sentences)-1, 2):
+        sentence = sentences[i].strip()
+        punct = sentences[i+1]
+        doc = nlp(sentence)
+        words = [token.text for token in doc]
+        verb_idx = -1
+        for idx in range(len(doc)-1, -1, -1):
+            if doc[idx].pos_ == "VERB":
+                verb_idx = idx
+                break
+        if verb_idx != -1 and verb_idx < len(words)-1:
+            yoda = words[verb_idx:] + words[:verb_idx]
+            yoda_sentence = ', '.join([' '.join(yoda[:len(words)-verb_idx]), ' '.join(yoda[len(words)-verb_idx:])]).capitalize() + punct
+        else:
+            yoda_sentence = sentence + punct
+        result.append(yoda_sentence)
+    if len(sentences) % 2 == 1:
+        result.append(sentences[-1])
+    yoda_text = ' '.join(result)
+    if random.random() < 0.8:
+        yoda_text += ' ' + random.choice(suffixes)
+    return yoda_text
+
 class MyClient(discord.Client):
     async def setup_hook(self):
         self.reddit = asyncpraw.Reddit('bot1')
         self.subreddit = await self.reddit.subreddit("countwithchickenlady")
         self.bg_task = self.loop.create_task(link_to_new_posts(self))
         self.image_of_day_task = self.loop.create_task(image_of_day_task(self))
+        self.tree = discord.app_commands.CommandTree(self)
+        @self.tree.command(name="yoda", description="Make your text sound like Yoda!")
+        @discord.app_commands.describe(text="The text to Yoda-ify")
+        async def yoda_command(interaction: discord.Interaction, text: str):
+            yoda_text = yoda_transform(text)
+            await interaction.response.send_message(yoda_text)
+        # Do not sync here, will sync in on_ready
 
 async def link_to_new_posts(client):
     await client.wait_until_ready()
@@ -171,14 +212,32 @@ client.on_message = on_message
 async def on_ready():
     print(f'Logged in as {client.user} (ID: {client.user.id})')
     print('------')
-    
+    print('Guilds the bot is in:')
+    for guild in client.guilds:
+        print(f"- {guild.name} (ID: {guild.id})")
+    # Sync slash commands (global or to a specific guild for instant update)
+    try:
+        if GUILD_ID and GUILD_ID.isdigit():
+            guild_obj = discord.Object(id=int(GUILD_ID))
+            await client.tree.sync(guild=guild_obj)
+            print(f"Slash commands synced to guild ID: {GUILD_ID}")
+            commands = await client.tree.fetch_commands(guild=guild_obj)
+        else:
+            await client.tree.sync()
+            print("Slash commands synced globally.")
+            commands = await client.tree.fetch_commands()
+        print("Registered slash commands:")
+        for cmd in commands:
+            print(f"- /{cmd.name}: {cmd.description}")
+    except Exception as e:
+        print(f"Error syncing slash commands: {e}")
+
     # Process missed messages in 'daily-bot-post'
     for guild in client.guilds:
         if guild.name == GUILD:
             for channel in guild.channels:
                 if channel.name == 'daily-bot-post' and isinstance(channel, discord.TextChannel):
                     async for message in channel.history(limit=100, oldest_first=True):
-                        # Only process messages not sent by the bot
                         if message.author != guild.me:
                             await on_message(message)
                             

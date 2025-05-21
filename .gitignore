@@ -1,0 +1,3 @@
+*.db
+praw.ini
+.env

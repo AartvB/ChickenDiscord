@@ -352,6 +352,7 @@ async def on_message(message):
         reactions = [str(r.emoji) for r in message.reactions]
         if '✅' not in reactions:
             await message.add_reaction('✅')
+            await message.reply(f"{message.author.mention}, I added a ✅ for you! If you want to vote on your own image, you can also click the checkmark yourself.", mention_author=True, delete_after=15)
     except Exception as e:
         print(f"Could not add reaction: {e}")
 

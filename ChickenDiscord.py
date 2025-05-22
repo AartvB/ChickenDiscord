@@ -11,12 +11,18 @@ import tempfile
 import datetime
 import random
 import spacy
+from spacy.lang.en import English
 
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
 GUILD = os.getenv('DISCORD_GUILD')
 GUILD_ID = os.getenv('DISCORD_GUILD_ID')
 CHANNEL = os.getenv('DISCORD_CHANNEL')
+
+# Load spaCy models once at module level for performance
+nlp = spacy.load("en_core_web_sm")
+nlp_sent = English()
+nlp_sent.add_pipe('sentencizer')
 
 async def get_last_announcement_time():
     conn = sqlite3.connect("ChickenCountingPosts.db")
@@ -38,35 +44,184 @@ async def set_last_announcement_time(timestamp):
     conn.close()
 
 def yoda_transform(text):
-
-    nlp = spacy.load("en_core_web_sm")
     suffixes = [
         "Hmm.", "Yes, hmmm.", "Strong with the Force, this one is.", "Mmm.", "Meditate on this, I will.", "The path to the dark side, that is.", "Powerful you have become.", "Do or do not, there is no try.", "Much to learn, you still have.", "Ready, are you?", "Clouded, this one’s future is.", "Begun, the Clone War has.", "A Jedi craves not these things.", "Always in motion is the future.", "Control, control, you must learn control!", "That is why you fail.", "Hmm. Difficult to see. Always in motion is the future.", "You must unlearn what you have learned.", "Adventure. Excitement. A Jedi craves not these things.", "Wars not make one great.", "Judge me by my size, do you?", "When nine hundred years old you reach, look as good you will not.", "Patience you must have, my young Padawan.", "Truly wonderful, the mind of a child is.", "Mind what you have learned. Save you it can.", "Much fear I sense in you.", "Help you I can, yes.", "Into exile I must go. Failed, I have.", "Hmm. Yes. A flaw more and more common this is.", "Twisted by the dark side, young Skywalker has become.", "The greatest teacher, failure is.", "Fear is the path to the dark side.", "Anger leads to hate, hate leads to suffering.", "Seen it, I have.", "Foreseen this, I have.", "Dark times are ahead.", "If so powerful you are, why leave?", "Long have I watched.", "Yessss.", "Strong am I with the Force.", "In a dark place we find ourselves.", "Hope is not lost.", "To answer power with power, the Jedi way this is not.", "Truly the dark side clouds everything.", "Rest I need, yes.", "Take care of you, I will.", "Trust the Force, you must.", "Listen you must.", "Clear your mind must be, if you are to discover the real villains behind this plot.", "Over many paths the Force flows.", "Your focus determines your reality."
     ]
-    sentences = re.split(r'([.!?])', text)
-    result = []
-    for i in range(0, len(sentences)-1, 2):
-        sentence = sentences[i].strip()
-        punct = sentences[i+1]
-        doc = nlp(sentence)
-        words = [token.text for token in doc]
-        verb_idx = -1
-        for idx in range(len(doc)-1, -1, -1):
-            if doc[idx].pos_ == "VERB":
-                verb_idx = idx
-                break
-        if verb_idx != -1 and verb_idx < len(words)-1:
-            yoda = words[verb_idx:] + words[:verb_idx]
-            yoda_sentence = ', '.join([' '.join(yoda[:len(words)-verb_idx]), ' '.join(yoda[len(words)-verb_idx:])]).capitalize() + punct
+    # Use spaCy's sentence segmentation for robust splitting
+    def split_sentences(text):
+        doc = nlp_sent(text)
+        return [sent.text.strip() for sent in doc.sents if sent.text.strip()]
+
+    sentences = split_sentences(text)
+    max_words = 12
+    for s in sentences:
+        if len(s.split()) > max_words:
+            return "Only with short sentences, Yoda talks. A short sentence should be given."
+    # Only add suffix to the last sentence
+    def yoda_transform_one(text, add_suffix):
+        doc = nlp(text)
+        preps = []
+        infinitives = []
+        complements = []
+        subject = []
+        verb = []
+        adverbs = []
+        others = []
+        used_tokens = set()
+
+        # Helper: get full noun phrase for a token (including determiners, adjectives, etc.)
+        def get_noun_phrase(token):
+            if token.pos_ not in ("NOUN", "PROPN", "PRON"):  # Only for nouns/pronouns
+                return token.text
+            subtree = list(token.subtree)
+            # Only include tokens that are part of the noun phrase (left to right)
+            left = min(t.i for t in subtree)
+            right = max(t.i for t in subtree)
+            return " ".join([token.doc[i].text for i in range(left, right+1)])
+
+        # Move adjectival/adverbial modifiers (acomp, advmod) to the front as well
+        def fix_first_word_cap(phrase):
+            if not orig_first_word:
+                return phrase
+            words = phrase.split()
+            if not words:
+                return phrase
+            if words[0] == orig_first_word:
+                if orig_first_cap and not orig_first_is_propn:
+                    words[0] = words[0][0].lower() + words[0][1:]
+            return " ".join(words)
+
+        # Track the original first word and its properties
+        first_token = doc[0] if len(doc) > 0 else None
+        orig_first_word = first_token.text if first_token else None
+        orig_first_cap = orig_first_word and orig_first_word[0].isupper()
+        orig_first_is_propn = first_token and (first_token.pos_ == "PROPN" or first_token.text == "I")
+
+        for token in doc:
+            if token.dep_ == "prep":
+                phrase = " ".join([t.text for t in token.subtree])
+                preps.append(phrase)
+                used_tokens.update(t.i for t in token.subtree)
+            elif token.tag_ == "TO" and token.head.pos_ == "VERB":
+                phrase = " ".join([t.text for t in token.subtree])
+                infinitives.append(phrase)
+                used_tokens.update(t.i for t in token.subtree)
+            elif token.dep_ in ("attr", "acomp", "xcomp", "ccomp", "dobj"):
+                # Use full noun phrase for complements
+                phrase = get_noun_phrase(token)
+                complements.append(phrase)
+                used_tokens.update(t.i for t in token.subtree)
+            elif token.dep_ in ("nsubj", "nsubjpass"):
+                # Use full noun phrase for subject
+                phrase = get_noun_phrase(token)
+                subject.append(phrase)
+                used_tokens.update(t.i for t in token.subtree)
+            elif token.dep_ in ("ROOT", "aux", "cop"):
+                verb.append(token.text)
+                used_tokens.add(token.i)
+            elif token.pos_ == "ADV":
+                adverbs.append(token.text)
+                used_tokens.add(token.i)
+            else:
+                if token.i not in used_tokens:
+                    others.append(token.text)
+
+        # Group advmod/acomp tokens into phrases and remove from adverbs/others to avoid duplication
+        advmod_acomp_indices = set()
+        advmod_acomp_phrases = []
+        for token in doc:
+            if token.dep_ in ("advmod", "acomp"):
+                phrase_tokens = list(token.subtree)
+                phrase_tokens.sort(key=lambda t: t.i)
+                indices = [t.i for t in phrase_tokens]
+                if indices == list(range(indices[0], indices[-1]+1)):
+                    phrase = " ".join([t.text for t in phrase_tokens])
+                    advmod_acomp_phrases.append(phrase)
+                    advmod_acomp_indices.update(indices)
+                else:
+                    advmod_acomp_phrases.append(token.text)
+                    advmod_acomp_indices.add(token.i)
+        # Remove advmod/acomp tokens from adverbs and others by token index, not by enumerate index
+        # Instead, remove by token text to avoid index mismatch and duplication
+        advmod_acomp_texts = set()
+        for phrase in advmod_acomp_phrases:
+            for word in phrase.split():
+                advmod_acomp_texts.add(word.lower())
+        adverbs = [w for w in adverbs if w.lower() not in advmod_acomp_texts]
+        others = [w for w in others if w.lower() not in advmod_acomp_texts]
+
+        front_phrases = []
+        if preps:
+            phrase = ", ".join(preps)
+            phrase = fix_first_word_cap(phrase)
+            front_phrases.append(phrase)
+        if infinitives:
+            phrase = " ".join(infinitives)
+            phrase = fix_first_word_cap(phrase)
+            front_phrases.append(phrase)
+        if complements:
+            phrase = " ".join(complements)
+            phrase = fix_first_word_cap(phrase)
+            front_phrases.append(phrase)
+        # Add grouped advmod/acomp phrases to the front
+        for phrase in advmod_acomp_phrases:
+            phrase = fix_first_word_cap(phrase)
+            front_phrases.append(phrase)
+        # Remove duplicate phrases in front_phrases while preserving order
+        seen = set()
+        unique_front_phrases = []
+        for phrase in front_phrases:
+            if phrase:
+                words = phrase.split()
+                filtered_words = [w for w in words if w.lower() not in seen]
+                if filtered_words:
+                    filtered_phrase = " ".join(filtered_words)
+                    unique_front_phrases.append(filtered_phrase)
+                    seen.update(w.lower() for w in filtered_words)
+        # Only the first front phrase gets a comma, the rest are joined by spaces
+        rest_parts = []
+        for part in [subject, verb, adverbs, others]:
+            if part:
+                phrase = " ".join(part)
+                phrase = fix_first_word_cap(phrase)
+                # Remove words already used
+                filtered_words = [w for w in phrase.split() if w.lower() not in seen]
+                if filtered_words:
+                    filtered_phrase = " ".join(filtered_words)
+                    rest_parts.append(filtered_phrase)
+                    seen.update(w.lower() for w in filtered_words)
+        sentence = ""
+        if unique_front_phrases:
+            sentence = unique_front_phrases[0]
+            if len(unique_front_phrases) > 1:
+                sentence += ", " + " ".join(unique_front_phrases[1:])
+            else:
+                sentence += ","
+        # Add the rest of the sentence
+        rest = " ".join(rest_parts).strip()
+        if sentence:
+            sentence = sentence.strip()
+            if rest:
+                sentence += " " + rest
         else:
-            yoda_sentence = sentence + punct
-        result.append(yoda_sentence)
-    if len(sentences) % 2 == 1:
-        result.append(sentences[-1])
-    yoda_text = ' '.join(result)
-    if random.random() < 0.8:
-        yoda_text += ' ' + random.choice(suffixes)
-    return yoda_text
+            sentence = rest
+        sentence = sentence.strip().replace("  ", " ")
+        # Fix punctuation: attach punctuation to last word, no space before ! or ? or .
+        sentence = re.sub(r' ([.!?])', r'\1', sentence)
+        if not re.search(r'[.!?]$', sentence):
+            sentence += "."
+        # Capitalize the first letter of the sentence
+        if sentence:
+            sentence = sentence[0].upper() + sentence[1:]
+        if add_suffix and random.random() < 0.75:
+            sentence += " " + random.choice(suffixes)
+        return sentence
+
+    if len(sentences) > 1:
+        results = [yoda_transform_one(s, i == len(sentences)-1) for i, s in enumerate(sentences)]
+        return ' '.join(results)
+    # Single sentence
+    return yoda_transform_one(text, True)
 
 class MyClient(discord.Client):
     async def setup_hook(self):
@@ -153,7 +308,7 @@ async def image_of_day_task(client):
                                         await submission.reply(
                                             "This image was chosen by the people in our discord server. Want to have a vote on this? Join us [here](https://discord.gg/tefj2Xu9FP)!"
                                         )
-                                        await top_msg.reply(f"This is the image I will post today, decided by your votes! Posted as [{new_number}](https://www.reddit.com/r/countwithchickenlady/comments/{submission.id}/)", mention_author=True)
+                                        await top_msg.reply(f"This is the image I will post today, decided on by your votes! You can find it here in post [{new_number}](https://www.reddit.com/r/countwithchickenlady/comments/{submission.id}/). Post one ore more images below if you want your image to be posted by me tomorrow!", mention_author=True)
                                         await set_last_announcement_time(now)
                                     finally:
                                         os.remove(tmp_file_path)

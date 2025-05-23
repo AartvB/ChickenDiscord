@@ -9,20 +9,12 @@ import re
 import aiohttp
 import tempfile
 import datetime
-import random
-import spacy
-from spacy.lang.en import English
 
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
 GUILD = os.getenv('DISCORD_GUILD')
 GUILD_ID = os.getenv('DISCORD_GUILD_ID')
 CHANNEL = os.getenv('DISCORD_CHANNEL')
-
-# Load spaCy models once at module level for performance
-nlp = spacy.load("en_core_web_sm")
-nlp_sent = English()
-nlp_sent.add_pipe('sentencizer')
 
 async def get_last_announcement_time():
     conn = sqlite3.connect("ChickenCountingPosts.db")
